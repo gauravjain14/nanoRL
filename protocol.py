@@ -12,3 +12,17 @@ class RolloutGroup:
         self.created_at = created_at
         self.trajectories = trajectories
         self.source_learner_step = source_learner_step
+
+    
+class Trajectory:
+    def __init__(self, prompt_ids, response_ids, behavior_logprobs,
+                 loss_mask, reward, finish_reason):
+        self.prompt_ids = prompt_ids
+        self.response_ids = response_ids
+        # not sure why they are called this but this is comparing
+        # trainer logprobs to the generator policy's logprobs.
+        self.behavior_logprobs = behavior_logprobs
+        # loss_mask - which tokens contribute to the loss.
+        self.loss_mask = loss_mask
+        self.reward = reward
+        self.finish_reason = finish_reason
