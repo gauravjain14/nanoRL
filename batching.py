@@ -1,5 +1,7 @@
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from protocol import RolloutGroup, Trajectory
+
 
 
 def collate_groups(groups, pad_token_id):
@@ -57,4 +59,3 @@ def collate_groups(groups, pad_token_id):
         "rewards": torch.tensor(rewards, dtype=torch.float32),
         "group_index": torch.tensor(group_indices, dtype=torch.long),
     }
-
