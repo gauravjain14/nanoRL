@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 
 def token_logprobs(logits, input_ids):
+    # find the logprobs for the tokens in the input_ids
     log_probs = F.log_softmax(
         logits[:, :-1], dim=-1, dtype=torch.float32)
     target_ids = input_ids[:, 1:]
