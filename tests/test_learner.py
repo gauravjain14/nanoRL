@@ -1,0 +1,95 @@
+"""From nanoRL/: python -B -m unittest discover -s tests -p test_learner.py -v"""
+
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock
+
+import torch
+import torch.nn.functional as F
+
+from learner import score_batch, train_step
+
+
+class ScoreBatchTests(unittest.TestCase):
+    def test_forward_contract_and_gradient_modes(self):
+        logits = torch.arange(30, dtype=torch.float32).reshape(2, 3, 5).requires_grad_()
+        model = Mock(return_value=SimpleNamespace(logits=logits))
+        batch = {
+            "input_ids": torch.tensor([[1, 2, 3], [1, 4, 0]]),
+            "attention_mask": torch.tensor([[True, True, True], [True, True, False]]),
+        }
+        scores = score_batch(model, batch)
+        model.assert_called_once_with(**batch, use_cache=False, return_dict=True)
+        expected = -F.cross_entropy(
+            logits[:, :-1].transpose(1, 2), batch["input_ids"][:, 1:], reduction="none"
+        )
+        torch.testing.assert_close(scores, expected)
+        scores.sum().backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertGreater(logits.grad.abs().sum().item(), 0.)
+        with torch.no_grad():
+            cached = score_batch(model, batch)
+        self.assertFalse(cached.requires_grad)
+        torch.testing.assert_close(cached, scores.detach())
+
+
+class TinyPolicy(torch.nn.Module):
+    """One trainable next-token distribution per input token; no downloads."""
+
+    def __init__(self):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.zeros(8, 8))
+
+    def forward(self, input_ids, **kwargs):
+        return SimpleNamespace(logits=10 * self.logits[input_ids])
+
+
+class TrainStepTests(unittest.TestCase):
+    def setUp(self):
+        self.model = TinyPolicy().eval()
+        self.optimizer = SimpleNamespace(
+            zero_grad=self.model.zero_grad, step=Mock(side_effect=self.sgd_step)
+        )
+        self.batch = {
+            "input_ids": torch.tensor([[1, 2, 3, 4], [1, 2, 5, 0]]),
+            "attention_mask": torch.tensor([[True, True, True, True], [True, True, True, False]]),
+            "loss_mask": torch.tensor([[False, False, True, True], [False, False, True, False]]),
+            "rewards": torch.tensor([1., 0.]),
+            "group_index": torch.tensor([0, 0]),
+        }
+        with torch.no_grad():
+            self.proximal = score_batch(self.model, self.batch)
+        self.batch["behavior_logprobs"] = torch.cat([torch.zeros(2, 1), self.proximal.clone()], dim=1)
+
+    @torch.no_grad()
+    def sgd_step(self):
+        self.model.logits.add_(self.model.logits.grad, alpha=-.001)
+
+    def test_updates_clear_gradients_and_preserve_proximal(self):
+        original_proximal = self.proximal.clone()
+        self.model.logits.grad = torch.full_like(self.model.logits, float("inf"))
+        for step_count in (1, 2):
+            before = self.model.logits.detach().clone()
+            metrics = train_step(self.model, self.optimizer, self.batch, self.proximal)
+            self.assertEqual(self.optimizer.step.call_count, step_count)
+            self.assertFalse(torch.equal(self.model.logits, before))
+            torch.testing.assert_close(self.proximal, original_proximal, rtol=0, atol=0)
+            for key in ("loss", "grad_norm"):
+                self.assertIsInstance(metrics[key], float)
+                self.assertTrue(torch.isfinite(torch.tensor(metrics[key])))
+            if step_count == 1:
+                self.assertGreater(metrics["grad_norm"], 1.)
+            self.assertLessEqual(self.model.logits.grad.norm().item(), 1.00001)
+
+    def test_nonfinite_gradient_rejects_before_optimizer(self):
+        before = self.model.logits.detach().clone()
+        hook = self.model.logits.register_hook(lambda grad: torch.full_like(grad, float("inf")))
+        self.addCleanup(hook.remove)
+        with self.assertRaisesRegex(RuntimeError, "non-finite"):
+            train_step(self.model, self.optimizer, self.batch, self.proximal)
+        self.optimizer.step.assert_not_called()
+        torch.testing.assert_close(self.model.logits, before, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()
